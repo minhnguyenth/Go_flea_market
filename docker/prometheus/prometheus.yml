@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s # Scraping interval
+
+scrape_configs:
+  - job_name: 'prometheus' # Prometheus own metrics
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'postgres_exporter'
+    static_configs:
+      # Specify container name and exposed port for postgres_exporter service
+      - targets: ['postgres_exporter:9187']
+
+  - job_name: 'redis_exporter'
+    static_configs:
+      # Specify container name and exposed port for redis_exporter service
+      - targets: ['redis_exporter:9121']
+
+  - job_name: 'user_app' # Pull metrics from user app /metrics endpoint
+    static_configs:
+      - targets: ['user_app:8081']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+# Comment by toshi.
+# Prometheus has a Pull structure for metrics.
+# Exporters with Push structure for metrics need to provide an endpoint for pushing metrics.

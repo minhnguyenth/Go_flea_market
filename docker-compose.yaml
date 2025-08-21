@@ -1,0 +1,267 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - 5432:5432
+    volumes:
+      - ./docker/postgres/init.d:/docker-entrypoint-initdb.d
+      - ./docker/postgres/pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ginuser
+      POSTGRES_PASSWORD: ginpassword
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+      POSTGRES_DB: freemarket
+      POSTGRES_EXPORTER_PASSWORD: ginpassword
+    hostname: postgres
+    restart: always
+    user: root
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - app-network
+      - monitor-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ginuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: always
+    ports:
+      - 81:80
+    environment:
+      PGADMIN_DEFAULT_EMAIL: gin@example.com
+      PGADMIN_DEFAULT_PASSWORD: ginpassword
+    volumes:
+      - ./docker/pgadmin:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitor-net
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+      - monitor-net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Logging system
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - monitor-net
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://ginuser:ginpassword@postgres:5432/freemarket?sslmode=disable"
+    depends_on:
+      - postgres
+    ports:
+      - "9187:9187"
+    restart: always
+    networks:
+      - app-network
+      - monitor-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.59.0
+    container_name: redis_exporter
+    environment:
+      REDIS_ADDR: "redis:6379"
+    depends_on:
+      - redis
+    ports:
+      - "9121:9121"
+    restart: always
+    networks:
+      - app-network
+      - monitor-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v2.51.1
+    container_name: prometheus
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    restart: always
+    networks:
+      - monitor-net
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/admin/Dockerfile
+    container_name: admin_app
+    ports:
+      - "8080:8080" 
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DB_HOST: postgres
+      DB_USER: ginuser
+      DB_PASSWORD: ginpassword
+      DB_NAME: freemarket
+      DB_PORT: 5432
+      JWT_SECRET: 4936320d6b6cf251c510060827f5e9066ff3ec5fddb781a84a54c9fd2966082e8dcc06646edc99f340d87a78243752377ae144a1dc4e730ccea78ab0fafae65b
+      REDIS_HOST: redis:6379
+      ADMIN_PORT: 8080
+    networks:
+      - app-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    container_name: user_app
+    ports:
+      - "8081:8081" # Map host 8081 to container 8081 (when Go app listens on 8081)
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DB_HOST: postgres
+      DB_USER: ginuser
+      DB_PASSWORD: ginpassword
+      DB_NAME: freemarket
+      DB_PORT: 5432
+      JWT_SECRET: 4936320d6b6cf251c510060827f5e9066ff3ec5fddb781a84a54c9fd2966082e8dcc06646edc99f340d87a78243752377ae144a1dc4e730ccea78ab0fafae65b
+      REDIS_HOST: redis:6379
+      APP_PORT: 8081
+    networks:
+      - app-network
+    restart: unless-stopped
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://loki:3100/loki/api/v1/push"
+        loki-external-labels: "service=user_app"
+
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    restart: on-failure
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    networks:
+      - monitor-net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8070:8080"
+    stop_signal: SIGKILL
+    stop_grace_period: 5s
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --disable_metrics=disk,network,tcp,udp
+      - --storage_duration=1m
+      - --allow_dynamic_housekeeping=false
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+    restart: on-failure
+    networks:
+      - monitor-net
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://loki:3100/loki/api/v1/push"
+        loki-external-labels: "service={{.Name}}"
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  app-network:
+    driver: bridge
+  monitor-net:
+    driver: bridge
+
+volumes:
+  loki-data:
+  grafana-data:
+  prometheus-data:
